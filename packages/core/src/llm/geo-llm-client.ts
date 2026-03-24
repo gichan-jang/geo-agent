@@ -19,8 +19,15 @@ export const LLMRequestSchema = z.object({
 	max_tokens: z.number().int().positive().optional(),
 	temperature: z.number().min(0).max(2).optional(),
 	json_mode: z.boolean().default(false),
+	web_search: z.boolean().optional(),
 });
 export type LLMRequest = z.infer<typeof LLMRequestSchema>;
+
+export const WebSearchSourceSchema = z.object({
+	url: z.string(),
+	title: z.string(),
+});
+export type WebSearchSource = z.infer<typeof WebSearchSourceSchema>;
 
 export const LLMResponseSchema = z.object({
 	content: z.string(),
@@ -33,6 +40,8 @@ export const LLMResponseSchema = z.object({
 	}),
 	latency_ms: z.number(),
 	cost_usd: z.number(),
+	/** 웹 검색으로 참조된 출처 목록 (빈 배열이면 웹 검색 미사용 또는 출처 없음) */
+	web_search_sources: z.array(WebSearchSourceSchema).optional(),
 });
 export type LLMResponse = z.infer<typeof LLMResponseSchema>;
 

@@ -23,7 +23,7 @@ import {
 	validateToolCall,
 } from "@mariozechner/pi-ai";
 import type { TSchema } from "@mariozechner/pi-ai";
-import type { LLMRequest, LLMResponse } from "./geo-llm-client.js";
+import type { LLMRequest, LLMResponse, WebSearchSource } from "./geo-llm-client.js";
 import type { LLMProviderSettings } from "./provider-config.js";
 
 // ── Provider Mapping ────────────────────────────────────────
@@ -127,28 +127,58 @@ export async function piAiComplete(
 		messages,
 	};
 
-	// json_mode: inject response_format / text.format into the raw API payload
-	const onPayload = request.json_mode
+	// onPayload: inject json_mode and/or web_search into the raw API payload
+	const needsPayloadHook = request.json_mode || request.web_search;
+	const onPayload = needsPayloadHook
 		? (payload: unknown) => {
 				const p = payload as Record<string, unknown>;
 				const api = model.api;
-				if (api === "openai-completions" || api === "mistral-conversations") {
-					// OpenAI chat/completions format
-					p.response_format = { type: "json_object" };
-				} else if (
-					api === "openai-responses" ||
-					api === "openai-codex-responses" ||
-					api === "azure-openai-responses"
-				) {
-					// OpenAI Responses API format
-					p.text = { format: { type: "json_object" } };
-				} else if (api === "google-generative-ai" || api === "google-vertex") {
-					// Google: inject into generationConfig
-					const gc = (p.generationConfig ?? {}) as Record<string, unknown>;
-					gc.responseMimeType = "application/json";
-					p.generationConfig = gc;
+
+				// ── json_mode ────────────────────────────────────
+				if (request.json_mode) {
+					if (api === "openai-completions" || api === "mistral-conversations") {
+						p.response_format = { type: "json_object" };
+					} else if (
+						api === "openai-responses" ||
+						api === "openai-codex-responses" ||
+						api === "azure-openai-responses"
+					) {
+						p.text = { format: { type: "json_object" } };
+					} else if (api === "google-generative-ai" || api === "google-vertex") {
+						const gc = (p.generationConfig ?? {}) as Record<string, unknown>;
+						gc.responseMimeType = "application/json";
+						p.generationConfig = gc;
+					}
+					// Anthropic: no native json_mode — handled via prompt instructions
 				}
-				// Anthropic: no native json_mode — handled via prompt instructions
+
+				// ── web_search ───────────────────────────────────
+				if (request.web_search) {
+					if (
+						api === "openai-responses" ||
+						api === "openai-codex-responses" ||
+						api === "azure-openai-responses"
+					) {
+						const tools = (p.tools ?? []) as unknown[];
+						tools.push({ type: "web_search_preview" });
+						p.tools = tools;
+					} else if (api === "openai-completions" || api === "mistral-conversations") {
+						const tools = (p.tools ?? []) as unknown[];
+						tools.push({ type: "web_search" });
+						p.tools = tools;
+					} else if (api === "google-generative-ai" || api === "google-vertex") {
+						const tools = (p.tools ?? []) as unknown[];
+						tools.push({ google_search_retrieval: {} });
+						p.tools = tools;
+					} else if (api === "anthropic-messages") {
+						const tools = (p.tools ?? []) as unknown[];
+						tools.push({ type: "web_search_20250305", name: "web_search", max_uses: 3 });
+						p.tools = tools;
+					}
+					// Perplexity (routed as openai-completions with custom baseUrl):
+					// web search is default behavior, no injection needed
+				}
+
 				return p;
 			}
 		: undefined;
@@ -168,6 +198,12 @@ export async function piAiComplete(
 
 	const cost = calculateCost(model, response.usage);
 
+	// Extract web search sources from response text (markdown links)
+	let webSearchSources: WebSearchSource[] | undefined;
+	if (request.web_search) {
+		webSearchSources = extractWebSearchSources(textContent);
+	}
+
 	return {
 		content: textContent,
 		model: response.model,
@@ -179,7 +215,45 @@ export async function piAiComplete(
 		},
 		latency_ms: Date.now() - startTime,
 		cost_usd: cost.total,
+		web_search_sources: webSearchSources,
 	};
+}
+
+/**
+ * LLM 웹 검색 응답에서 인용 출처 URL을 추출.
+ * OpenAI web_search_preview: 마크다운 링크 [title](url) 형태로 인용 포함.
+ * Perplexity: [n] 번호 + 하단 URL 목록 또는 인라인 링크.
+ */
+function extractWebSearchSources(text: string): WebSearchSource[] {
+	const sources: WebSearchSource[] = [];
+	const seen = new Set<string>();
+
+	// Pattern 1: Markdown links — [title](url)
+	const mdLinkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+	let match: RegExpExecArray | null;
+	match = mdLinkRegex.exec(text);
+	while (match !== null) {
+		const url = match[2];
+		if (!seen.has(url)) {
+			seen.add(url);
+			sources.push({ title: match[1], url });
+		}
+		match = mdLinkRegex.exec(text);
+	}
+
+	// Pattern 2: Bare URLs not already captured
+	const bareUrlRegex = /(?<!\()(https?:\/\/[^\s)"',]+)/g;
+	match = bareUrlRegex.exec(text);
+	while (match !== null) {
+		const url = match[1];
+		if (!seen.has(url)) {
+			seen.add(url);
+			sources.push({ title: url, url });
+		}
+		match = bareUrlRegex.exec(text);
+	}
+
+	return sources;
 }
 
 // ── Tool-calling Agent Loop ─────────────────────────────────

@@ -288,6 +288,75 @@ describe("Synthetic Probes", () => {
 		});
 	});
 
+	describe("runProbes — web_search_used field", () => {
+		it("web_search_used reflects actual sources returned", async () => {
+			// Mock returns no web_search_sources → web_search_used = false
+			const chat = mockChatLLM("Samsung response", true);
+			const result = await runProbes(
+				defaultContext,
+				{ chatLLM: chat },
+				{ probeIds: ["P-01"], delayMs: 0 },
+			);
+			expect(result.probes[0].web_search_used).toBe(false);
+			expect(result.probes[0].web_search_sources).toEqual([]);
+		});
+
+		it("web_search_used is true when LLM returns sources", async () => {
+			const chat = vi.fn().mockImplementation(async (req: { json_mode?: boolean }) => {
+				if (req.json_mode === true) {
+					return {
+						content: JSON.stringify({ cited: true, reasoning: "mock" }),
+						model: "gpt-4o",
+						provider: "openai",
+						usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+						latency_ms: 100,
+						cost_usd: 0.001,
+					};
+				}
+				return {
+					content: "Samsung info from [samsung.com](https://samsung.com)",
+					model: "gpt-4o",
+					provider: "openai",
+					usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+					latency_ms: 100,
+					cost_usd: 0.001,
+					web_search_sources: [{ url: "https://samsung.com", title: "samsung.com" }],
+				};
+			});
+			const result = await runProbes(
+				defaultContext,
+				{ chatLLM: chat },
+				{ probeIds: ["P-01"], delayMs: 0 },
+			);
+			expect(result.probes[0].web_search_used).toBe(true);
+			expect(result.probes[0].web_search_sources).toHaveLength(1);
+			expect(result.probes[0].web_search_sources[0].url).toBe("https://samsung.com");
+		});
+
+		it("passes web_search flag in LLM request for probe query only", async () => {
+			const chat = mockChatLLM("Samsung response", true);
+			await runProbes(defaultContext, { chatLLM: chat }, { probeIds: ["P-01"], delayMs: 0 });
+			// 3 calls: probe query, citation check, accuracy check
+			// Only the first call (probe query) should have web_search: true
+			const calls = chat.mock.calls;
+			expect(calls[0][0].web_search).toBe(true);
+			expect(calls[1][0].web_search).toBeUndefined();
+			expect(calls[2][0].web_search).toBeUndefined();
+		});
+
+		it("web_search_used is false on error results", async () => {
+			const chat = vi.fn().mockRejectedValue(new Error("fail"));
+			const result = await runProbes(
+				defaultContext,
+				{ chatLLM: chat },
+				{ probeIds: ["P-01"], delayMs: 0 },
+			);
+			expect(result.probes[0].web_search_used).toBe(false);
+			expect(result.probes[0].web_search_sources).toEqual([]);
+			expect(result.probes[0].verdict).toBe("FAIL");
+		});
+	});
+
 	describe("runProbes — accuracy estimation", () => {
 		it("higher accuracy with more topic matches", async () => {
 			const chatWithTopics = mockChatLLM(

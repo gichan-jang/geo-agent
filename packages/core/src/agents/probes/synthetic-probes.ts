@@ -11,7 +11,7 @@
  * P-07: 최신 정보 → 최신 정보 반영 여부
  * P-08: 문제 해결 → 솔루션으로 Target 언급 여부
  */
-import type { LLMRequest, LLMResponse } from "../../llm/geo-llm-client.js";
+import type { LLMRequest, LLMResponse, WebSearchSource } from "../../llm/geo-llm-client.js";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -49,6 +49,10 @@ export interface SyntheticProbeResult {
 	accuracy: number;
 	/** 결과 판정 */
 	verdict: "PASS" | "PARTIAL" | "FAIL";
+	/** 웹 검색이 활성화된 상태에서 실행되었는지 */
+	web_search_used: boolean;
+	/** 웹 검색으로 참조된 출처 URL 목록 (비어있으면 웹 검색 미발동) */
+	web_search_sources: WebSearchSource[];
 	latency_ms: number;
 	model: string;
 	provider: string;
@@ -261,6 +265,8 @@ export async function runProbes(
 	context: ProbeContext,
 	deps: {
 		chatLLM: (req: LLMRequest) => Promise<LLMResponse>;
+		/** 프로브 질의에 웹 검색 활성화 (기본: true) */
+		webSearch?: boolean;
 	},
 	options?: {
 		/** 실행할 프로브 ID 목록 (기본: 전체) */
@@ -274,19 +280,27 @@ export async function runProbes(
 		: PROBE_DEFINITIONS;
 
 	const delayMs = options?.delayMs ?? 1000;
+	const useWebSearch = deps.webSearch ?? true;
 	const results: SyntheticProbeResult[] = [];
 
 	for (const probe of probesToRun) {
 		const query = probe.generateQuery(context);
 
 		try {
+			const siteHost = new URL(context.site_url).hostname;
 			const llmResponse = await deps.chatLLM({
 				prompt: query,
-				system_instruction:
-					"사용자의 질문에 정확하고 상세하게 답변하세요. 가능하면 출처나 브랜드를 언급하세요.",
+				system_instruction: `You must answer ONLY using information found on the website ${context.site_url} (domain: ${siteHost}).
+Rules:
+1. Search the web for the target site and answer based solely on what you find there.
+2. Do NOT use your pre-existing knowledge or information from other websites.
+3. If the target site does not contain the requested information, clearly state: "해당 정보는 ${context.site_name} 사이트에서 확인할 수 없습니다."
+4. Always include the specific URL(s) from ${siteHost} that you referenced.
+5. Do NOT cite or reference any site other than ${siteHost}.`,
 				max_tokens: 500,
 				temperature: 0.3,
 				json_mode: false,
+				web_search: useWebSearch,
 			});
 
 			const cited = await checkCitation(
@@ -308,6 +322,8 @@ export async function runProbes(
 				cited,
 				accuracy,
 				verdict,
+				web_search_used: useWebSearch && (llmResponse.web_search_sources ?? []).length > 0,
+				web_search_sources: llmResponse.web_search_sources ?? [],
 				latency_ms: llmResponse.latency_ms,
 				model: llmResponse.model,
 				provider: llmResponse.provider,
@@ -322,6 +338,8 @@ export async function runProbes(
 				cited: false,
 				accuracy: 0,
 				verdict: "FAIL",
+				web_search_used: false,
+				web_search_sources: [],
 				latency_ms: 0,
 				model: "error",
 				provider: "error",
