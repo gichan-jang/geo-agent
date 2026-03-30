@@ -1212,11 +1212,15 @@ async function loadEvaluation() {
 			stickyEl.classList.remove('hidden');
 			stickyEl.innerHTML = renderStickyScoreHeader(evalData);
 			drawGaugeCanvas(evalData.initial_score);
-			// Load executive summary: use cached if available, otherwise fetch
+			// Load executive summary: cached only (generated during pipeline REPORTING stage)
 			if (evalData.executive_summary && evalData.executive_summary.catchphrase) {
 				renderExecutiveSummary(evalData.executive_summary);
 			} else {
-				loadExecutiveSummary(targetId, selectedPipelineId);
+				var area = document.getElementById('execSummaryArea');
+				if (area) {
+					area.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;">Executive Summary는 파이프라인 분석(REPORTING) 단계에서 생성됩니다. 아직 생성된 요약이 없습니다.</div>';
+					area.className = '';
+				}
 			}
 			// Add LLM models info to status header
 			if (evalData.llm_models_used && evalData.llm_models_used.length > 0) {
@@ -1449,20 +1453,12 @@ function renderExecutiveSummary(summary) {
 }
 
 async function loadExecutiveSummary(targetId, pipelineId) {
+	// No longer fetches from server — executive summary is only available if
+	// generated during pipeline REPORTING stage and embedded in evalData.
 	var area = document.getElementById('execSummaryArea');
 	if (!area) return;
-	try {
-		var summary = await api('/api/targets/' + targetId + '/pipeline/' + pipelineId + '/executive-summary');
-		if (summary.error) {
-			area.innerHTML = '';
-			area.className = '';
-			return;
-		}
-		renderExecutiveSummary(summary);
-	} catch (e) {
-		area.innerHTML = '';
-		area.className = '';
-	}
+	area.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;">Executive Summary는 파이프라인 분석(REPORTING) 단계에서 생성됩니다. 아직 생성된 요약이 없습니다.</div>';
+	area.className = '';
 }
 
 function deltaBadge(delta) {
